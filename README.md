@@ -1,2 +1,2 @@
-# markku-80-v
-Markku's 80th birthday app
+# Markun-sp-matka
+Markku's 70th birthday app
