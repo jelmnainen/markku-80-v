@@ -1,4 +1,4 @@
-module Main exposing (..)
+port module Main exposing (..)
 
 import Browser
 import Html exposing (Html, button, div, form, h1, h3, img, input, label, text)
@@ -6,12 +6,17 @@ import Html.Attributes exposing (class, for, id, src, type_, value)
 import Html.Events exposing (onClick, onInput, onSubmit)
 import Http
 import Json.Decode as D
+import Json.Encode as E
 import Process
 import Task
 
 
 
 ---- MODEL ----
+
+
+type alias Progression =
+    List Int
 
 
 type alias Mission =
@@ -41,19 +46,24 @@ type alias ContentfulSettings =
 type alias Model =
     { missions : List Mission
     , currentMission : Maybe Mission
+    , progression : Progression
     , answerField : String
     , notifications : List Notification
     }
 
 
 type alias Flags =
-    { contentfulSpaceId : String, contentfulAccessKey : String }
+    { contentfulSpaceId : String
+    , contentfulAccessKey : String
+    , progression : String
+    }
 
 
 init : Flags -> ( Model, Cmd Msg )
 init flags =
     ( { missions = []
       , currentMission = Nothing
+      , progression = decodeProgress flags.progression
       , answerField = ""
       , notifications = []
       }
@@ -94,15 +104,24 @@ update msg model =
                     case List.member normalizedAnswer normalizedCorrectAnswers of
                         True ->
                             let
+                                newProgression =
+                                    case model.currentMission of
+                                        Just m ->
+                                            m.position :: model.progression
+
+                                        Nothing ->
+                                            model.progression
+
                                 newMission =
-                                    findNextMission model.missions currentMission
+                                    findNextMission model.missions newProgression
                             in
                             ( { model
                                 | notifications = [ { level = Success, text = "Oikein!" } ]
                                 , currentMission = newMission
+                                , progression = newProgression
                                 , answerField = ""
                               }
-                            , setClearNotifications
+                            , Cmd.batch [ setClearNotifications, saveProgress newProgression ]
                             )
 
                         False ->
@@ -121,7 +140,7 @@ update msg model =
                 Ok missionsList ->
                     let
                         maybeFirstMission =
-                            findFirstMission missionsList
+                            findNextMission missionsList model.progression
                     in
                     ( { model | missions = missionsList, currentMission = maybeFirstMission }, Cmd.none )
 
@@ -158,14 +177,20 @@ missionsDecoder =
 ---- HELPERS ----
 
 
-findFirstMission : List Mission -> Maybe Mission
-findFirstMission =
-    List.head << List.sortBy .position
+missionIsCompleted : Progression -> Mission -> Bool
+missionIsCompleted progression mission =
+    List.member mission.position progression
+        |> not
 
 
-findNextMission : List Mission -> Mission -> Maybe Mission
-findNextMission missions currentMission =
-    List.head (List.filter (\m -> m.position == (1 + currentMission.position)) missions)
+findNextMission : List Mission -> Progression -> Maybe Mission
+findNextMission missions progression =
+    let
+        availableMissions =
+            List.filter (missionIsCompleted progression) missions
+                |> List.sortBy .position
+    in
+    List.head availableMissions
 
 
 normalizeAnswer : String -> String
@@ -187,7 +212,7 @@ view : Model -> Html Msg
 view model =
     div []
         [ viewNotifications model.notifications
-        , viewCurrentMission model.currentMission model.answerField
+        , viewCurrentMission model.currentMission ((List.isEmpty >> not) model.missions) model.answerField
         ]
 
 
@@ -215,19 +240,28 @@ viewNotification notification =
     div [ class ("alert alert-" ++ color) ] [ text notification.text ]
 
 
-viewCurrentMission : Maybe Mission -> String -> Html Msg
-viewCurrentMission maybeMission answerField =
+type alias MissionsExist =
+    Bool
+
+
+viewCurrentMission : Maybe Mission -> MissionsExist -> String -> Html Msg
+viewCurrentMission maybeMission missionsExist answerField =
     case maybeMission of
         Just mission ->
             viewMission mission answerField
 
         Nothing ->
-            noMissions
+            noDisplayableMissions missionsExist
 
 
-noMissions : Html Msg
-noMissions =
-    div [] [ text "Vihjettä ei löytynyt. Ota yhteyttä tekniseen tukeen WhatsApissa." ]
+noDisplayableMissions : MissionsExist -> Html Msg
+noDisplayableMissions missionsExist =
+    case missionsExist of
+        True ->
+            div [] [ text "Kaikki tehtävät ovat tehdyt. Onneksi olkoon!" ]
+
+        False ->
+            div [] [ text "Vihjettä ei löytynyt. Ota yhteyttä tekniseen tukeen WhatsApissa." ]
 
 
 viewMission : Mission -> String -> Html Msg
@@ -244,6 +278,30 @@ viewMission mission answerField =
             , button [ type_ "submit", class "btn btn-primary" ] [ text "Lähetä" ]
             ]
         ]
+
+
+
+-- PORTS ----
+
+
+port saveProgressToLocalStore : String -> Cmd msg
+
+
+decodeProgress : String -> List Int
+decodeProgress progression =
+    case D.decodeString (D.list D.int) progression of
+        Ok res ->
+            res
+
+        Err _ ->
+            []
+
+
+saveProgress : List Int -> Cmd msg
+saveProgress ids =
+    E.list E.int ids
+        |> E.encode 0
+        |> saveProgressToLocalStore
 
 
 
