@@ -2,8 +2,10 @@ module Main exposing (..)
 
 import Browser
 import Html exposing (Html, button, div, form, h1, h3, img, input, label, text)
-import Html.Attributes exposing (class, for, id, src, type_)
-import Html.Events exposing (onInput, onSubmit)
+import Html.Attributes exposing (class, for, id, src, type_, value)
+import Html.Events exposing (onClick, onInput, onSubmit)
+import Http
+import Json.Decode as D
 import Process
 import Task
 
@@ -12,13 +14,9 @@ import Task
 ---- MODEL ----
 
 
-type alias Answer =
-    String
-
-
 type alias Mission =
     { hint : String
-    , answers : List Answer
+    , answers : List String
     , position : Int
     }
 
@@ -34,36 +32,32 @@ type alias Notification =
     }
 
 
+type alias ContentfulSettings =
+    { spaceId : String
+    , accessKey : String
+    }
+
+
 type alias Model =
     { missions : List Mission
     , currentMission : Maybe Mission
-    , answer : Answer
+    , answerField : String
     , notifications : List Notification
     }
 
 
-init : ( Model, Cmd Msg )
-init =
-    ( { missions =
-            [ { hint = "Eka kyssäri"
-              , answers = [ "Eka vastaus" ]
-              , position = 0
-              }
-            , { hint = "Toka kyssäri"
-              , answers = [ "Toka vastaus a", "Toka vastaus b" ]
-              , position = 1
-              }
-            ]
-      , currentMission =
-            Just
-                { hint = "Eka kyssäri"
-                , answers = [ "Eka vastaus" ]
-                , position = 0
-                }
-      , answer = ""
+type alias Flags =
+    { contentfulSpaceId : String, contentfulAccessKey : String }
+
+
+init : Flags -> ( Model, Cmd Msg )
+init flags =
+    ( { missions = []
+      , currentMission = Nothing
+      , answerField = ""
       , notifications = []
       }
-    , Cmd.none
+    , getMissions flags.contentfulSpaceId flags.contentfulAccessKey
     )
 
 
@@ -75,13 +69,14 @@ type Msg
     = UpdateAnswer String
     | SubmitAnswer
     | ClearNotifications
+    | GotMissions (Result Http.Error (List Mission))
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         UpdateAnswer newAnswer ->
-            ( { model | answer = newAnswer }, Cmd.none )
+            ( { model | answerField = newAnswer }, Cmd.none )
 
         SubmitAnswer ->
             case model.currentMission of
@@ -91,7 +86,7 @@ update msg model =
                 Just currentMission ->
                     let
                         normalizedAnswer =
-                            normalizeAnswer model.answer
+                            normalizeAnswer model.answerField
 
                         normalizedCorrectAnswers =
                             List.map normalizeAnswer currentMission.answers
@@ -102,17 +97,70 @@ update msg model =
                                 newMission =
                                     findNextMission model.missions currentMission
                             in
-                            ( { model | notifications = [ { level = Success, text = "Oikein!" } ], currentMission = newMission }, setClearNotifications )
+                            ( { model
+                                | notifications = [ { level = Success, text = "Oikein!" } ]
+                                , currentMission = newMission
+                                , answerField = ""
+                              }
+                            , setClearNotifications
+                            )
 
                         False ->
-                            ( { model | notifications = [ { level = Error, text = "Väärin!" } ] }, setClearNotifications )
+                            ( { model
+                                | notifications = [ { level = Error, text = "Väärin!" } ]
+                                , answerField = ""
+                              }
+                            , setClearNotifications
+                            )
 
         ClearNotifications ->
             ( { model | notifications = [] }, Cmd.none )
 
+        GotMissions response ->
+            case response of
+                Ok missionsList ->
+                    let
+                        maybeFirstMission =
+                            findFirstMission missionsList
+                    in
+                    ( { model | missions = missionsList, currentMission = maybeFirstMission }, Cmd.none )
+
+                Err _ ->
+                    ( { model | notifications = [ { level = Error, text = "Tehtäviä ei saatu haettua. Ota yhteyttä tekniseen tukeen." } ] }, Cmd.none )
+
+
+
+---- HTTP ----
+
+
+getMissions : String -> String -> Cmd Msg
+getMissions spaceId accessKey =
+    Http.get
+        { url = "https://cdn.contentful.com/spaces/" ++ spaceId ++ "/environments/master-2021-01-05/entries?access_token=" ++ accessKey ++ "&content_type=missions"
+        , expect = Http.expectJson GotMissions missionsDecoder
+        }
+
+
+missionDecoder : D.Decoder Mission
+missionDecoder =
+    D.map3 Mission
+        (D.field "hint" D.string)
+        (D.field "answers" (D.list D.string))
+        (D.field "position" D.int)
+
+
+missionsDecoder : D.Decoder (List Mission)
+missionsDecoder =
+    D.field "items" (D.list (D.field "fields" missionDecoder))
+
 
 
 ---- HELPERS ----
+
+
+findFirstMission : List Mission -> Maybe Mission
+findFirstMission =
+    List.head << List.sortBy .position
 
 
 findNextMission : List Mission -> Mission -> Maybe Mission
@@ -139,7 +187,7 @@ view : Model -> Html Msg
 view model =
     div []
         [ viewNotifications model.notifications
-        , viewCurrentMission model.currentMission model.answer
+        , viewCurrentMission model.currentMission model.answerField
         ]
 
 
@@ -167,11 +215,11 @@ viewNotification notification =
     div [ class ("alert alert-" ++ color) ] [ text notification.text ]
 
 
-viewCurrentMission : Maybe Mission -> Answer -> Html Msg
-viewCurrentMission maybeMission answer =
+viewCurrentMission : Maybe Mission -> String -> Html Msg
+viewCurrentMission maybeMission answerField =
     case maybeMission of
         Just mission ->
-            viewMission mission answer
+            viewMission mission answerField
 
         Nothing ->
             noMissions
@@ -182,8 +230,8 @@ noMissions =
     div [] [ text "Vihjettä ei löytynyt. Ota yhteyttä tekniseen tukeen WhatsApissa." ]
 
 
-viewMission : Mission -> Answer -> Html Msg
-viewMission mission answer =
+viewMission : Mission -> String -> Html Msg
+viewMission mission answerField =
     div []
         [ h3 [] [ text mission.hint ]
         , form
@@ -191,7 +239,7 @@ viewMission mission answer =
             [ div
                 [ class "form-group" ]
                 [ label [ for "hint" ] [ text "Vastaus" ]
-                , input [ type_ "text", class "form-control", id "hint", onInput UpdateAnswer ] [ text answer ]
+                , input [ type_ "text", class "form-control", id "hint", onInput UpdateAnswer, value answerField ] []
                 ]
             , button [ type_ "submit", class "btn btn-primary" ] [ text "Lähetä" ]
             ]
@@ -202,11 +250,11 @@ viewMission mission answer =
 ---- PROGRAM ----
 
 
-main : Program () Model Msg
+main : Program Flags Model Msg
 main =
     Browser.element
         { view = view
-        , init = \_ -> init
+        , init = init
         , update = update
         , subscriptions = always Sub.none
         }
