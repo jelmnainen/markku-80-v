@@ -1,8 +1,8 @@
 port module Main exposing (..)
 
 import Browser
-import Html exposing (Html, button, div, form, h1, h3, img, input, label, text)
-import Html.Attributes exposing (class, for, id, src, type_, value)
+import Html exposing (Html, audio, button, div, form, h1, h3, img, input, label, text)
+import Html.Attributes exposing (class, controls, for, id, src, type_, value)
 import Html.Events exposing (onClick, onInput, onSubmit)
 import Http
 import Json.Decode as D
@@ -12,7 +12,7 @@ import Task
 
 
 
----- MODEL ----
+---- TYPES ----
 
 
 type alias Progression =
@@ -23,6 +23,13 @@ type alias Mission =
     { hint : String
     , answers : List String
     , position : Int
+    , mediaId : Maybe String
+    }
+
+
+type alias Asset =
+    { id : String
+    , url : String
     }
 
 
@@ -49,6 +56,7 @@ type alias Model =
     , progression : Progression
     , answerField : String
     , notifications : List Notification
+    , assets : List Asset
     }
 
 
@@ -66,8 +74,12 @@ init flags =
       , progression = decodeProgress flags.progression
       , answerField = ""
       , notifications = []
+      , assets = []
       }
-    , getMissions flags.contentfulSpaceId flags.contentfulAccessKey
+    , Cmd.batch
+        [ getMissions flags.contentfulSpaceId flags.contentfulAccessKey
+        , getAssets flags.contentfulSpaceId flags.contentfulAccessKey
+        ]
     )
 
 
@@ -80,6 +92,7 @@ type Msg
     | SubmitAnswer
     | ClearNotifications
     | GotMissions (Result Http.Error (List Mission))
+    | GotAssets (Result Http.Error (List Asset))
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -145,7 +158,15 @@ update msg model =
                     ( { model | missions = missionsList, currentMission = maybeFirstMission }, Cmd.none )
 
                 Err _ ->
-                    ( { model | notifications = [ { level = Error, text = "Tehtäviä ei saatu haettua. Ota yhteyttä tekniseen tukeen." } ] }, Cmd.none )
+                    ( { model | notifications = [ { level = Error, text = "Tehtäviä ei saatu haettua. Ota yhteyttä tekniseen tukeen WhatsApissa." } ] }, Cmd.none )
+
+        GotAssets response ->
+            case response of
+                Ok assetList ->
+                    ( { model | assets = assetList }, Cmd.none )
+
+                Err _ ->
+                    ( { model | notifications = [ { level = Error, text = "Tehtävien mediaa ei saatu haettua. Ota yhteyttä tekniseen tukeen WhatsApissa" } ] }, Cmd.none )
 
 
 
@@ -155,22 +176,43 @@ update msg model =
 getMissions : String -> String -> Cmd Msg
 getMissions spaceId accessKey =
     Http.get
-        { url = "https://cdn.contentful.com/spaces/" ++ spaceId ++ "/environments/master-2021-01-05/entries?access_token=" ++ accessKey ++ "&content_type=missions"
+        { url = "https://cdn.contentful.com/spaces/" ++ spaceId ++ "/environments/master-2021-01-05/entries?access_token=" ++ accessKey ++ "&content_type=missions&include=0"
         , expect = Http.expectJson GotMissions missionsDecoder
+        }
+
+
+getAssets : String -> String -> Cmd Msg
+getAssets spaceId accessKey =
+    Http.get
+        { url = "https://cdn.contentful.com/spaces/" ++ spaceId ++ "/environments/master-2021-01-05/assets/?access_token=" ++ accessKey
+        , expect = Http.expectJson GotAssets assetsDecoder
         }
 
 
 missionDecoder : D.Decoder Mission
 missionDecoder =
-    D.map3 Mission
+    D.map4 Mission
         (D.field "hint" D.string)
         (D.field "answers" (D.list D.string))
         (D.field "position" D.int)
+        (D.maybe (D.at [ "media", "sys", "id" ] D.string))
 
 
 missionsDecoder : D.Decoder (List Mission)
 missionsDecoder =
     D.field "items" (D.list (D.field "fields" missionDecoder))
+
+
+assetDecoder : D.Decoder Asset
+assetDecoder =
+    D.map2 Asset
+        (D.at [ "sys", "id" ] D.string)
+        (D.at [ "fields", "file", "url" ] D.string)
+
+
+assetsDecoder : D.Decoder (List Asset)
+assetsDecoder =
+    D.field "items" (D.list assetDecoder)
 
 
 
@@ -208,11 +250,40 @@ setClearNotifications =
 ---- VIEW ----
 
 
+type HasAsset
+    = Has String
+    | NotFound
+    | DoesntHave
+
+
 view : Model -> Html Msg
 view model =
+    let
+        missionAsset =
+            case model.currentMission of
+                Just mission ->
+                    case mission.mediaId of
+                        Just id ->
+                            List.filter (\asset -> asset.id == id) model.assets
+                                |> List.head
+                                |> (\maybeAsset ->
+                                        case maybeAsset of
+                                            Just asset ->
+                                                Has asset.url
+
+                                            Nothing ->
+                                                NotFound
+                                   )
+
+                        Nothing ->
+                            DoesntHave
+
+                Nothing ->
+                    DoesntHave
+    in
     div []
         [ viewNotifications model.notifications
-        , viewCurrentMission model.currentMission ((List.isEmpty >> not) model.missions) model.answerField
+        , viewCurrentMission model.currentMission ((List.isEmpty >> not) model.missions) model.answerField missionAsset
         ]
 
 
@@ -244,11 +315,19 @@ type alias MissionsExist =
     Bool
 
 
-viewCurrentMission : Maybe Mission -> MissionsExist -> String -> Html Msg
-viewCurrentMission maybeMission missionsExist answerField =
+viewCurrentMission : Maybe Mission -> MissionsExist -> String -> HasAsset -> Html Msg
+viewCurrentMission maybeMission missionsExist answerField hasAsset =
     case maybeMission of
         Just mission ->
-            viewMission mission answerField
+            case hasAsset of
+                Has url ->
+                    viewMissionWithMedia mission url answerField
+
+                DoesntHave ->
+                    viewMission mission answerField
+
+                NotFound ->
+                    viewMissionWithMediaError mission answerField
 
         Nothing ->
             noDisplayableMissions missionsExist
@@ -268,6 +347,40 @@ viewMission : Mission -> String -> Html Msg
 viewMission mission answerField =
     div []
         [ h3 [] [ text mission.hint ]
+        , form
+            [ onSubmit SubmitAnswer ]
+            [ div
+                [ class "form-group" ]
+                [ label [ for "hint" ] [ text "Vastaus" ]
+                , input [ type_ "text", class "form-control", id "hint", onInput UpdateAnswer, value answerField ] []
+                ]
+            , button [ type_ "submit", class "btn btn-primary" ] [ text "Lähetä" ]
+            ]
+        ]
+
+
+viewMissionWithMedia : Mission -> String -> String -> Html Msg
+viewMissionWithMedia mission mediaUrl answerField =
+    div []
+        [ h3 [] [ text mission.hint ]
+        , audio [ controls True, src mediaUrl ] []
+        , form
+            [ onSubmit SubmitAnswer ]
+            [ div
+                [ class "form-group" ]
+                [ label [ for "hint" ] [ text "Vastaus" ]
+                , input [ type_ "text", class "form-control", id "hint", onInput UpdateAnswer, value answerField ] []
+                ]
+            , button [ type_ "submit", class "btn btn-primary" ] [ text "Lähetä" ]
+            ]
+        ]
+
+
+viewMissionWithMediaError : Mission -> String -> Html Msg
+viewMissionWithMediaError mission answerField =
+    div []
+        [ h3 [] [ text mission.hint ]
+        , text "Tällä tehtävällä pitäisi olla mediavihje, mutta sen löytäminen ei onnistunut. Ota yhteyttä tekniseen tukeen WhatsApissa. Kerro tehtävän saateteksti, jolloin saat paluuviestinä tehtävään liittyvän mediavihjeen."
         , form
             [ onSubmit SubmitAnswer ]
             [ div
